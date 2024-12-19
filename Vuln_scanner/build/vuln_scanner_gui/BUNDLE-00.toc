@@ -1,0 +1,3 @@
+([('vuln_scanner_gui',
+   '/Users/tanvir/Downloads/Vuln_scanner/dist/vuln_scanner_gui',
+   'EXECUTABLE')],)
