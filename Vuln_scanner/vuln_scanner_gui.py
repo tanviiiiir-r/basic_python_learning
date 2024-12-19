@@ -4,9 +4,11 @@ import shodan
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext, filedialog
 import configparser
+import threading
 from datetime import datetime
 import json
 import requests
+import ipaddress
 
 # Function to read the Shodan API key from config.ini
 def get_shodan_api_key():
@@ -21,6 +23,20 @@ def get_shodan_api_key():
     except FileNotFoundError:
         messagebox.showerror("Error", "config.ini not found. Place it in the same directory as this script.")
         return None
+
+def update_tab_content(tab, content):
+    tab.config(state="normal")  # Temporarily enable editing
+    tab.delete('1.0', tk.END)  # Clear existing content
+    tab.insert(tk.END, content)  # Insert new content
+    tab.config(state="disabled")  # Disable editing again
+
+# Function to validate IP address
+def is_valid_ip(ip):
+    try:
+        ipaddress.ip_address(ip)
+        return True
+    except ValueError:
+        return False
 
 # Function to scan open ports using nmap with advanced options
 def scan_ports(target_ip):
@@ -49,7 +65,10 @@ def scan_ports(target_ip):
                     host_data["ports"].append(port_info)
 
             if "osclass" in nm[host]:
-                host_data["os"] = nm[host]["osclass"]
+                for os_class in nm[host]["osclass"]:
+                    os_info = f"OS: {os_class.get('osfamily', 'Unknown')} {os_class.get('osgen', '')} | Accuracy: {os_class.get('accuracy', 'N/A')}%"
+                    host_data["os"].append(os_info)
+        
 
         display_host_status(host_data)
         update_progress(50)
@@ -57,6 +76,33 @@ def scan_ports(target_ip):
     except Exception as e:
         log_message(f"Error during scanning: {e}")
     return open_ports, {}
+
+# Function to scan using Nmap scripts
+def nmap_script_scan(target_ip):
+    nm = nmap.PortScanner()
+    script_results = []
+    log_message("Running Nmap script scan...")
+    try:
+        nm.scan(hosts=target_ip, arguments='--script vuln -T4')
+        for host in nm.all_hosts():
+            if "hostscript" in nm[host]:
+                for script in nm[host]["hostscript"]:
+                    script_results.append({
+                        "id": script.get("id", "Unknown"),
+                        "output": script.get("output", "No output")
+                    })
+        display_script_results(script_results)
+    except Exception as e:
+        log_message(f"Error during Nmap script scan: {e}")
+
+# Function to display script results
+def display_script_results(script_results):
+    vulnerabilities_tab.insert(tk.END, "--- Script Results ---\n")
+    for result in script_results:
+        vulnerabilities_tab.insert(
+            tk.END,
+            f"Script ID: {result['id']}\nOutput: {result['output']}\n\n"
+        )
 
 # Function to fetch vulnerabilities using Shodan
 def check_vulnerabilities(target_ip, open_ports, shodan_key):
@@ -93,44 +139,54 @@ def fetch_location(ip):
 
 # Function to display host status
 def display_host_status(host_data):
-    host_status_tab.delete('1.0', tk.END)
-    host_status_tab.insert(tk.END, f"Host: {host_data['host']}\n")
-    host_status_tab.insert(tk.END, f"State: {host_data['state']}\n")
-    host_status_tab.insert(tk.END, "Ports:\n")
+    content = f"Host: {host_data['host']}\n"
+    content += f"State: {host_data['state']}\n"
+    content += "Ports:\n"
     for port in host_data["ports"]:
-        host_status_tab.insert(
-            tk.END,
-            f"  Port: {port['port']} | State: {port['state']} | Service: {port['service']} | Product: {port['product']}\n"
-        )
-    host_status_tab.insert(tk.END, f"OS: {host_data['os']}\n")
+        content += f"  Port: {port['port']} | State: {port['state']} | Service: {port['service']} | Product: {port['product']}\n"
+    content += f"OS: {host_data['os']}\n"
+    update_tab_content(host_status_tab, content)
+
+# Function to save results to a JSON file
+def export_results(data):
+    file_path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON Files", "*.json")])
+    if file_path:
+        try:
+            with open(file_path, 'w') as file:
+                json.dump(data, file, indent=4)
+            log_message(f"Results exported to {file_path}")
+        except Exception as e:
+            log_message(f"Error exporting results: {e}")
 
 # Function to display vulnerabilities
 def display_vulnerabilities(vulnerabilities):
-    vulnerabilities_tab.delete('1.0', tk.END)
-    vulnerabilities_tab.insert(tk.END, "--- Vulnerabilities ---\n")
+    content = "--- Vulnerabilities ---\n"
     for vuln in vulnerabilities:
-        vulnerabilities_tab.insert(
-            tk.END,
-            f"Port {vuln['port']}: {vuln['product']} - {vuln['vulnerabilities']}\n"
-        )
+        content += f"Port {vuln['port']}: {vuln['product']} - {vuln['vulnerabilities']}\n"
+    update_tab_content(vulnerabilities_tab, content)
 
 # Function to display location
 def display_location(location_data):
-    location_tab.delete('1.0', tk.END)
-    location_tab.insert(tk.END, "--- Location Information ---\n")
+    content = "--- Location Information ---\n"
     for key, value in location_data.items():
-        location_tab.insert(tk.END, f"{key.capitalize()}: {value}\n")
+        content += f"{key.capitalize()}: {value}\n"
+    update_tab_content(location_tab, content)
 
 # Function to log messages in real-time
 def log_message(message):
     timestamp = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
-    progress_tab.insert(tk.END, f"{timestamp} {message}\n")
-    progress_tab.see(tk.END)
+    content = f"{timestamp} {message}\n"
+    update_tab_content(progress_tab, content)
 
 # Function to update progress bar
 def update_progress(value):
     progress_bar["value"] = value
     app.update_idletasks()
+
+
+# Threaded function for starting the scan
+def start_scan_thread():
+    threading.Thread(target=start_scan, daemon=True).start()
 
 # Main function triggered by the Scan button
 def start_scan():
@@ -162,26 +218,52 @@ app.geometry("900x700")
 app.config(bg="black")
 
 style = ttk.Style()
+
+# Style for Tabs
 style.configure("TNotebook", background="black")
 style.configure("TNotebook.Tab", background="black", foreground="green", font=("Courier", 12))
+
+# Style for Frames
 style.configure("TFrame", background="black")
-style.configure("TButton", background="black", foreground="green", font=("Courier", 12))
+
+# Default Button Style (white background, green font)
+style.configure("TButton", background="white", foreground="green", font=("Courier", 12), padding=5)
+style.map("TButton", background=[("active", "lightgray")])
+
+# Custom Style for Red Buttons (Start Scan and Export Results)
+style.configure("RedButton.TButton", background="#000000", foreground="red", font=("Courier", 12), padding=5)
+style.map("RedButton.TButton", background=[("active", "#1a1a1a")])  # Deep black background on hover
+
 
 # Tabs
 tabs = ttk.Notebook(app)
 tabs.pack(expand=1, fill="both")
 
-host_status_tab = scrolledtext.ScrolledText(app, wrap=tk.WORD, bg="black", fg="green", font=("Courier", 10))
+# Host Status Tab
+host_status_tab = scrolledtext.ScrolledText(
+    app, wrap=tk.WORD, bg="black", fg="green", font=("Courier", 10), state="disabled"
+)
 tabs.add(host_status_tab, text="Host Status")
 
-vulnerabilities_tab = scrolledtext.ScrolledText(app, wrap=tk.WORD, bg="black", fg="green", font=("Courier", 10))
+# Vulnerabilities Tab
+vulnerabilities_tab = scrolledtext.ScrolledText(
+    app, wrap=tk.WORD, bg="black", fg="green", font=("Courier", 10), state="disabled"
+)
 tabs.add(vulnerabilities_tab, text="Vulnerabilities")
 
-location_tab = scrolledtext.ScrolledText(app, wrap=tk.WORD, bg="black", fg="green", font=("Courier", 10))
+# Host Location Tab
+location_tab = scrolledtext.ScrolledText(
+    app, wrap=tk.WORD, bg="black", fg="green", font=("Courier", 10), state="disabled"
+)
 tabs.add(location_tab, text="Host Location")
 
-progress_tab = scrolledtext.ScrolledText(app, wrap=tk.WORD, bg="black", fg="green", font=("Courier", 10))
+# Logs Tab
+progress_tab = scrolledtext.ScrolledText(
+    app, wrap=tk.WORD, bg="black", fg="green", font=("Courier", 10), state="disabled"
+)
 tabs.add(progress_tab, text="Logs")
+
+
 
 # Input and Progress Bar
 input_frame = ttk.Frame(app)
@@ -193,6 +275,9 @@ ip_entry.grid(row=0, column=1, padx=5)
 
 scan_button = ttk.Button(input_frame, text="Start Scan", command=start_scan)
 scan_button.grid(row=0, column=2, padx=5)
+
+export_button = ttk.Button(input_frame, text="Export Results", command=lambda: export_results(host_data))
+export_button.grid(row=0, column=3, padx=5)
 
 progress_bar = ttk.Progressbar(app, orient="horizontal", length=700, mode="determinate")
 progress_bar.pack(pady=10)
